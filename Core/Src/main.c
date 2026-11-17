@@ -19,7 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stdio.h"
-
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -32,7 +31,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+static GPIO_PinState sensor_ir_estado;
+static GPIO_PinState sensor_ir_candidato;
+static uint32_t sensor_ir_mudanca_ms;
+static uint8_t sensor_ir_inicializado;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -55,6 +57,10 @@ int contador;
 uint32_t ADT[3];
 uint8_t rx_buff[4];
 
+#define TCRT5000_DO_GPIO_Port GPIOB
+#define TCRT5000_DO_Pin GPIO_PIN_0
+#define TCRT5000_NIVEL_DETECCAO GPIO_PIN_RESET
+#define TCRT5000_DEBOUNCE_MS 20U
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -72,6 +78,50 @@ static void MX_TIM4_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void SensorIR_Atualizar(void)
+{
+    GPIO_PinState leitura = HAL_GPIO_ReadPin(TCRT5000_DO_GPIO_Port,
+                                             TCRT5000_DO_Pin);
+    uint32_t agora = HAL_GetTick();
+
+    if (!sensor_ir_inicializado)
+    {
+        sensor_ir_estado = leitura;
+        sensor_ir_candidato = leitura;
+        sensor_ir_mudanca_ms = agora;
+        sensor_ir_inicializado = 1;
+        return;
+    }
+
+    if (leitura != sensor_ir_candidato)
+    {
+        sensor_ir_candidato = leitura;
+        sensor_ir_mudanca_ms = agora;
+    }
+
+    if (sensor_ir_candidato != sensor_ir_estado &&
+        (uint32_t)(agora - sensor_ir_mudanca_ms) >= TCRT5000_DEBOUNCE_MS)
+    {
+        sensor_ir_estado = sensor_ir_candidato;
+
+        if (sensor_ir_estado == TCRT5000_NIVEL_DETECCAO)
+        {
+            contador++;
+            printf("Passagens: %d\r\n", contador);
+        }
+    }
+}
+
+void AguardarComSensor(uint32_t tempo_ms)
+{
+    uint32_t inicio = HAL_GetTick();
+
+    while ((uint32_t)(HAL_GetTick() - inicio) < tempo_ms)
+    {
+        SensorIR_Atualizar();
+        HAL_Delay(1);
+    }
+}
 
 void Motor_SetSpeed(uint8_t velocidade)
 {
@@ -169,6 +219,10 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
+  uint8_t servo_aberto = 0;
+  uint32_t ultima_passagem_ms = 0;
+
+
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
       Error_Handler();
@@ -182,6 +236,12 @@ int main(void)
 
   HAL_UART_Receive_IT(&huart1, rx_buff, 4);
 
+  Servo_SetAngle(800);
+  SensorIR_Atualizar();
+
+  Motor_SetSpeed(100);
+  uint32_t inicio_motor_ms = HAL_GetTick();
+  uint8_t motor_em_partida = 1;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -189,20 +249,32 @@ int main(void)
   while (1)
   {
 
-	  Motor_SetSpeed(100);  // 30% PWM
-	  Servo_SetAngle(300);
-	  HAL_Delay(2000);
+		  if (motor_em_partida && (HAL_GetTick() - inicio_motor_ms) >= 100U)
+		  {
+			  Motor_SetSpeed(40);
+			  motor_em_partida = 0;
+		  }
 
-	  Servo_SetAngle(800);
-	  Motor_SetSpeed(30);
-	  HAL_Delay(4000);
-	  contador++;
-	  //HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-	  HAL_Delay(1000);
-	  //printf("Teste\n\r");
-	  if(HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin))HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, 1);
-	  else HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, 0);
+	  	int contador_anterior = contador;
+	    SensorIR_Atualizar();
 
+	    if (contador != contador_anterior)
+	    {
+	        Servo_SetAngle(300);
+	        ultima_passagem_ms = HAL_GetTick();
+	        servo_aberto = 1;
+	    }
+
+	    if (servo_aberto && (HAL_GetTick() - ultima_passagem_ms) >= 2000U)
+	    {
+	        Servo_SetAngle(800);
+	        servo_aberto = 0;
+	    }
+
+	    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin,
+	                      HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin));
+
+	    HAL_Delay(1);
 
     /* USER CODE END WHILE */
 
@@ -561,6 +633,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
